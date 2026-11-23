@@ -57,9 +57,12 @@ export class LockedError extends Error {
 
 interface ErrorPayload {
   error?: string;
+  code?: string;
   locked?: boolean;
   group?: Group;
 }
+
+const REQUEST_TIMEOUT_MS = 15_000;
 
 async function request<T>(path: string, init: RequestInit = {}, groupId?: string): Promise<T> {
   const headers = new Headers(init.headers);
@@ -75,8 +78,15 @@ async function request<T>(path: string, init: RequestInit = {}, groupId?: string
 
   let response: Response;
   try {
-    response = await fetch(path, { ...init, headers });
-  } catch {
+    response = await fetch(path, {
+      ...init,
+      headers,
+      signal: init.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (networkError) {
+    if (networkError instanceof Error && networkError.name === "TimeoutError") {
+      throw new Error("The chat took too long to answer. Try again.");
+    }
     throw new Error("You look offline. Check your connection and try again.");
   }
 
