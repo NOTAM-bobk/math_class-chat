@@ -35,6 +35,8 @@ export default function App() {
   React.useEffect(() => {
     let cancelled = false;
     const load = async () => {
+      // A hidden tab does not need to poll; it catches up on visibilitychange.
+      if (document.hidden) return;
       try {
         const data = await api.listGroups();
         if (cancelled) return;
@@ -48,9 +50,14 @@ export default function App() {
     };
     void load();
     const timer = window.setInterval(load, 8_000);
+    const onVisible = () => {
+      if (!document.hidden) void load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [reload, selectedId]);
 
@@ -65,7 +72,7 @@ export default function App() {
     let stopped = false;
 
     const load = async () => {
-      if (stopped) return;
+      if (stopped || document.hidden) return;
       try {
         const data = await api.messages(selectedId);
         if (cancelled) return;
@@ -81,15 +88,20 @@ export default function App() {
           return;
         }
         setStatus((previous) => (previous === "ready" ? "ready" : "offline"));
-        setError(loadError instanceof Error ? loadError.message : "Chat is unreachable right now.");
+        setError(loadError instanceof Error ? loadError.message : "Chat is unreachable right now. Try again.");
       }
     };
 
     void load();
     const timer = window.setInterval(load, 2_500);
+    const onVisible = () => {
+      if (!document.hidden) void load();
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [selectedId, reload]);
 
@@ -129,7 +141,7 @@ export default function App() {
           setStatus("locked");
           setError("");
         } else {
-          setError(sendError instanceof Error ? sendError.message : "That message did not send.");
+          setError(sendError instanceof Error ? sendError.message : "That message did not send. Try again.");
         }
         return false;
       }
@@ -163,7 +175,11 @@ export default function App() {
     else if (!lock) unlockTokens.remove(selectedGroup.id);
     setGroups((current) => current.map((group) => (group.id === result.group.id ? result.group : group)));
     setDialog(null);
-    setNotice(lock ? "Group locked. Share the passcode with your people." : "Lock removed. The group is open again.");
+    setNotice(
+      lock
+        ? "Group locked. Share the passcode with your people."
+        : "Lock removed. Anyone with the link can read this group.",
+    );
     setReload((value) => value + 1);
   };
 
@@ -171,6 +187,10 @@ export default function App() {
 
   return (
     <div className="app">
+      <a className="skip-link" href="#main">
+        Skip to chat
+      </a>
+
       <Sidebar groups={groups} selectedId={group.id} onSelect={setSelectedId} onNewGroup={() => setDialog("new")} />
 
       <ChatPane
