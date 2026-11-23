@@ -24,12 +24,6 @@ const COUNTER_FROM = 120;
 
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
 
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean).slice(0, 2);
-  const letters = parts.map((part) => Array.from(part)[0] ?? "").join("");
-  return letters.toUpperCase() || "?";
-}
-
 export function ChatPane({
   group,
   identity,
@@ -157,6 +151,11 @@ export function ChatPane({
         </div>
 
         <div className="chat-actions">
+          <span className="live-chip">
+            <span className="live-dot" aria-hidden="true" />
+            Live
+            <span className="sr-only">, messages refresh automatically</span>
+          </span>
           <button
             type="button"
             className="ghost-btn"
@@ -223,24 +222,18 @@ export function ChatPane({
                       head ? "" : " is-continuation"
                     }`}
                   >
-                    <span
-                      className={`msg-mark${head ? "" : " is-empty"}`}
-                      aria-hidden={head ? undefined : true}
-                    >
-                      {head ? initials(mine ? identity.name || "You" : message.authorName) : ""}
-                    </span>
                     <div className="msg-content">
                       {head && (
                         <div className="msg-meta">
                           <span className="msg-author">{mine ? "You" : message.authorName}</span>
                           {message.pending && <span className="msg-pending">Sending…</span>}
+                          <time className="msg-time" dateTime={new Date(message.createdAt).toISOString()}>
+                            {timeFormat.format(message.createdAt)}
+                          </time>
                         </div>
                       )}
                       <p className="msg-body">{message.body}</p>
                     </div>
-                    <time className="msg-time" dateTime={new Date(message.createdAt).toISOString()}>
-                      {timeFormat.format(message.createdAt)}
-                    </time>
                   </article>
                 );
               })}
