@@ -20,7 +20,11 @@ const JSON_HEADERS = {
 };
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
-const fail = (error, status = 400) => json({ error }, status);
+const jsonWith = (data, status, headers) =>
+  new Response(JSON.stringify(data), { status, headers: { ...JSON_HEADERS, ...headers } });
+const fail = (error, status = 400, code) => json(code ? { error, code } : { error }, status);
+const methodNotAllowed = (allow) =>
+  jsonWith({ error: "Method not allowed.", code: "method_not_allowed" }, 405, { allow });
 
 /* ------------------------------------------------------------------ crypto */
 
@@ -252,8 +256,9 @@ async function createGroup(db, request) {
   const topic = cleanText(body.topic, MAX_TOPIC);
   const password = typeof body.password === "string" ? body.password.trim() : "";
 
-  if (name.length < 2) return fail("Give the group a name with at least 2 characters.");
-  if (password.length > 0 && password.length < 4) return fail("Passcodes need at least 4 characters.");
+  if (name.length < 2) return fail("Give the group a name with at least 2 characters.", 400, "invalid_name");
+  if (password.length > 0 && password.length < 4)
+    return fail("Passcodes need at least 4 characters.", 400, "invalid_passcode");
 
   const authorId = cleanText(request.headers.get("x-user-id"), 64) || "anon";
   const id = crypto.randomUUID();
@@ -289,11 +294,11 @@ async function unlockGroup(db, request, group) {
   if (!group.locked) return json({ token: null });
   const body = await readJson(request);
   const password = typeof body.password === "string" ? body.password : "";
-  if (!password) return fail("Enter the group passcode.", 400);
+  if (!password) return fail("Enter the group passcode.", 400, "passcode_missing");
 
   const attempted = await hashPassword(password, group.pass_salt ?? "");
   if (!constantTimeEqual(attempted, group.pass_hash ?? "")) {
-    return fail("That passcode is not right.", 401);
+    return fail("That passcode is not right.", 401, "incorrect_passcode");
   }
 
   const token = randomToken();
@@ -305,9 +310,9 @@ async function unlockGroup(db, request, group) {
 }
 
 async function setLock(db, request, group) {
-  if (group.is_home) return fail("The home chat cannot be locked.", 403);
+  if (group.is_home) return fail("The home chat cannot be locked.", 403, "home_group");
   if (!(await isOwner(db, group.id, request.headers.get("x-owner-token")))) {
-    return fail("Only the person who made this group can change its lock.", 403);
+    return fail("Only the person who made this group can change its lock.", 403, "not_owner");
   }
 
   const body = await readJson(request);
@@ -323,8 +328,8 @@ async function setLock(db, request, group) {
   }
 
   const password = typeof body.password === "string" ? body.password.trim() : "";
-  if (password.length < 4) return fail("Passcodes need at least 4 characters.");
-  if (password.length > 64) return fail("Keep the passcode under 64 characters.");
+  if (password.length < 4) return fail("Passcodes need at least 4 characters.", 400, "invalid_passcode");
+  if (password.length > 64) return fail("Keep the passcode under 64 characters.", 400, "passcode_too_long");
 
   const salt = randomToken();
   const hash = await hashPassword(password, salt);
@@ -339,7 +344,7 @@ async function setLock(db, request, group) {
 
 async function readMessages(db, request, group) {
   if (!(await canReadGroup(db, request, group))) {
-    return json({ error: "This group is locked.", locked: true, group: toGroup(group) }, 403);
+    return json({ error: "This group is locked.", code: "locked", locked: true, group: toGroup(group) }, 403);
   }
   const { results } = await db
     .prepare(`SELECT * FROM messages WHERE group_id = ? ORDER BY created_at DESC LIMIT ?`)
@@ -351,7 +356,7 @@ async function readMessages(db, request, group) {
 
 async function writeMessage(db, request, group) {
   if (!(await canReadGroup(db, request, group))) {
-    return json({ error: "This group is locked.", locked: true, group: toGroup(group) }, 403);
+    return json({ error: "This group is locked.", code: "locked", locked: true, group: toGroup(group) }, 403);
   }
 
   const body = await readJson(request);
@@ -359,9 +364,12 @@ async function writeMessage(db, request, group) {
   const authorId = cleanText(request.headers.get("x-user-id"), 64) || "anon";
   const authorName = cleanText(body.authorName, MAX_NICKNAME) || "Guest";
 
-  if (!text) return fail("Write something first.");
-  if (text.length > MAX_BODY) return fail(`Messages top out at ${MAX_BODY} characters.`);
-  if (!maySend(authorId)) return fail("Slow down a moment before the next message.", 429);
+  if (!text) return fail("Write something first.", 400, "empty_message");
+  if (text.length > MAX_BODY) return fail(`Messages top out at ${MAX_BODY} characters.`, 400, "message_too_long");
+  if (!maySend(authorId))
+    return jsonWith({ error: "Slow down a moment before the next message.", code: "rate_limited" }, 429, {
+      "retry-after": "15",
+    });
 
   const message = {
     id: crypto.randomUUID(),
@@ -387,38 +395,44 @@ async function handleApi(request, db) {
   const path = url.pathname.replace(/\/+$/, "");
   const method = request.method;
 
-  if (path === "/api/health") return json({ ok: true });
+  if (path === "/api/health") {
+    return method === "GET" ? json({ ok: true }) : methodNotAllowed("GET");
+  }
   if (path === "/api/groups") {
     if (method === "GET") return listGroups(db);
     if (method === "POST") return createGroup(db, request);
-    return fail("Method not allowed.", 405);
+    return methodNotAllowed("GET, POST");
   }
 
   const match = path.match(/^\/api\/groups\/([A-Za-z0-9_-]+)(?:\/(messages|unlock|lock))?$/);
-  if (!match) return fail("Not found.", 404);
+  if (!match) return fail("Not found.", 404, "not_found");
 
   const groupId = match[1];
   const action = match[2] ?? "";
-  if (!ID_PATTERN.test(groupId)) return fail("Not found.", 404);
+  if (!ID_PATTERN.test(groupId)) return fail("Not found.", 404, "not_found");
 
   const row = await getGroup(db, groupId);
-  if (!row) return fail("That group no longer exists.", 404);
+  if (!row) return fail("That group no longer exists.", 404, "group_not_found");
 
   if (!action) {
-    if (method !== "GET") return fail("Method not allowed.", 405);
+    if (method !== "GET") return methodNotAllowed("GET");
     return json({ group: toGroup(row) });
   }
 
   if (action === "messages") {
     if (method === "GET") return readMessages(db, request, row);
     if (method === "POST") return writeMessage(db, request, row);
-    return fail("Method not allowed.", 405);
+    return methodNotAllowed("GET, POST");
   }
 
-  if (action === "unlock" && method === "POST") return unlockGroup(db, request, row);
-  if (action === "lock" && method === "POST") return setLock(db, request, row);
+  if (action === "unlock") {
+    return method === "POST" ? unlockGroup(db, request, row) : methodNotAllowed("POST");
+  }
+  if (action === "lock") {
+    return method === "POST" ? setLock(db, request, row) : methodNotAllowed("POST");
+  }
 
-  return fail("Method not allowed.", 405);
+  return fail("Not found.", 404, "not_found");
 }
 
 /**
@@ -429,12 +443,13 @@ export async function handleRequest(request, db) {
     return fail(
       "The chat database is not connected. Set the DB binding on Cloudflare, or TURSO_DATABASE_URL on Vercel.",
       500,
+      "database_unavailable",
     );
   }
   try {
     return await handleApi(request, db);
   } catch (error) {
     console.error("chat api error", error);
-    return fail("The chat hit a snag. Try again in a moment.", 500);
+    return fail("The chat hit a snag. Try again in a moment.", 500, "server_error");
   }
 }
